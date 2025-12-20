@@ -1,14 +1,94 @@
 from __future__ import annotations
 
+import os
+import sys
 import argparse
 import json
+import urllib.request
+import urllib.error
+
 from pathlib import Path
 
 from .repo import GaitRepo
 from .schema import Turn
 from .objects import short_oid
 from .log import walk_commits
+from .tokens import count_turn_tokens
 
+# ----------------------------
+### Ollama API Helpers 
+# ---------------------------
+
+def _ollama_url(host: str, path: str) -> str:
+    host = host.rstrip("/")
+    if not host.startswith("http://") and not host.startswith("https://"):
+        host = "http://" + host
+    return host + path
+
+
+def _ollama_json(host: str, path: str, payload: dict | None = None, timeout: float = 60.0) -> dict:
+    url = _ollama_url(host, path)
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST" if payload is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ollama HTTP {e.code} {e.reason}: {body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot reach Ollama at {url}: {e}") from e
+
+
+def ollama_list_models(host: str) -> list[str]:
+    r = _ollama_json(host, "/api/tags")
+    models = []
+    for m in (r.get("models") or []):
+        name = m.get("name")
+        if name:
+            models.append(name)
+    return models
+
+
+def ollama_chat(
+    host: str,
+    model: str,
+    messages: list[dict],
+    *,
+    temperature: float | None = None,
+    num_predict: int = 200,
+) -> str:
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"num_predict": num_predict},
+    }
+    if temperature is not None:
+        payload["options"]["temperature"] = temperature
+
+    r = _ollama_json(host, "/api/chat", payload=payload, timeout=600.0)
+    return ((r.get("message") or {}).get("content")) or ""
+
+def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
+    """
+    Resolve a commit-ish into a concrete commit id string.
+    v0 supports:
+      - None / "HEAD" / "@": current HEAD commit
+      - any prefix/full hash: passed through (repo.get_commit() can validate later)
+    """
+    if commitish is None or commitish in ("HEAD", "@"):
+        cid = repo.head_commit_id()
+        if not cid:
+            raise ValueError("HEAD is empty (no commits).")
+        return cid
+    return commitish.strip()
 
 # ----------------------------
 # Commands
@@ -67,7 +147,7 @@ def cmd_revert(args: argparse.Namespace) -> int:
             return 0
         target = parents[0]
     else:
-        target = args.commit
+        target = _resolve_commitish(repo, args.commit)
 
     resolved = repo.reset_branch(target)
     print(f"reverted: {branch} -> {resolved}")
@@ -122,7 +202,7 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 def cmd_show(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
-    commit_id = args.commit or repo.head_commit_id()
+    commit_id = _resolve_commitish(repo, args.commit)
 
     commit = repo.get_commit(commit_id)
     print(f"commit: {commit_id}")
@@ -259,6 +339,213 @@ def cmd_context(args: argparse.Namespace) -> int:
 
 
 # ----------------------------
+# Ollama chat 
+# ----------------------------
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+
+    host = args.host
+    model = args.model
+
+    # If no model provided, pick the first available or fail nicely
+    if not model:
+        models = ollama_list_models(host)
+        if not models:
+            raise RuntimeError("No Ollama models found. Run `ollama pull llama3.1` (or similar) and try again.")
+        model = models[0]
+        print(f"[gait] no --model provided; using: {model}")
+
+    # Build a system message from GAIT memory (optional)
+    messages: list[dict] = []
+    if not args.no_memory:
+        bundle = repo.build_context_bundle(full=False)
+        if bundle.get("items"):
+            lines = ["You are a helpful assistant. Use the following pinned context from GAIT memory if relevant:"]
+            for it in bundle["items"]:
+                u = it.get("user_text", "").strip()
+                a = it.get("assistant_text", "").strip()
+                note = it.get("note", "").strip()
+                header = f"- PIN {it['index']}" + (f" ({note})" if note else "")
+                lines.append(header)
+                if u:
+                    lines.append(f"  User: {u}")
+                if a:
+                    lines.append(f"  Assistant: {a}")
+            system_text = "\n".join(lines)
+            messages.append({"role": "system", "content": system_text})
+
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+
+    # ----------------------------
+    # Resume from HEAD history (replay last N turns)
+    # ----------------------------
+    do_resume = (not args.no_resume) and (args.resume_turns > 0)
+    if do_resume:
+        start = _resolve_commitish(repo, args.resume_from)
+        turns = repo.iter_turns_from_head(start_commit=start, limit_turns=args.resume_turns)
+
+        for t in turns:
+            u = (t.get("user") or {}).get("text", "")
+            a = (t.get("assistant") or {}).get("text", "")
+            if u:
+                messages.append({"role": "user", "content": u})
+            if a:
+                messages.append({"role": "assistant", "content": a})
+
+        if turns:
+            print(f"[gait] resumed {len(turns)} prior turn(s) from history")
+            last_u = ((turns[-1].get("user") or {}).get("text", "") or "").strip()
+            if last_u:
+                print(f"[gait] last user: {last_u[:80]}{'...' if len(last_u) > 80 else ''}")
+
+    print(f"[gait] repo={repo.root} branch={repo.current_branch()} model={model} host={host}")
+    print("[gait] enter your questions. Commands: /models /model NAME /pin /revert [/revert COMMIT] /memory /exit")
+    print()
+
+    while True:
+        try:
+            user_text = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[gait] bye.")
+            return 0
+
+        if not user_text:
+            continue
+
+        # --- small text-menu commands ---
+        if user_text in ("/exit", "/quit"):
+            print("[gait] bye.")
+            return 0
+
+        if user_text == "/models":
+            ms = ollama_list_models(host)
+            if not ms:
+                print("[gait] no models found.")
+            else:
+                for m in ms:
+                    print(m)
+            continue
+
+        if user_text.startswith("/model "):
+            new_model = user_text.split(" ", 1)[1].strip()
+            if not new_model:
+                print("[gait] usage: /model <name>")
+                continue
+            model = new_model
+            print(f"[gait] model set to: {model}")
+            continue
+
+        if user_text == "/memory":
+            bundle = repo.build_context_bundle(full=False)
+            print(json.dumps(bundle, ensure_ascii=False, indent=2))
+            continue
+
+        if user_text.startswith("/revert"):
+            parts = user_text.split()
+            commit = parts[1] if len(parts) > 1 else None
+
+            # reuse your revert behavior: default parent-of-HEAD
+            branch = repo.current_branch()
+            head = repo.head_commit_id()
+            if not head:
+                print("[gait] nothing to revert (empty branch)")
+                continue
+
+            if commit is None:
+                c = repo.get_commit(head)
+                parents = c.get("parents") or []
+                if not parents:
+                    repo.write_ref(branch, "")
+                    print(f"[gait] reverted: {branch} is now empty")
+                else:
+                    resolved = repo.reset_branch(parents[0])
+                    print(f"[gait] reverted: {branch} -> {resolved}")
+            else:
+                resolved = repo.reset_branch(commit)
+                print(f"[gait] reverted: {branch} -> {resolved}")
+
+            if args.also_memory:
+                old_mem = repo.read_memory_ref(branch)
+                new_mem = repo.reset_memory_to_commit(branch, repo.head_commit_id())
+                print(f"[gait] memory: {old_mem} -> {new_mem}")
+
+            continue
+
+        if user_text == "/pin":
+            # pin the last commit with turns (skip merges) — same logic as cmd_pin
+            head = repo.head_commit_id()
+            if not head:
+                print("[gait] no HEAD commit to pin.")
+                continue
+
+            cid = head
+            seen = set()
+            found = None
+            while cid and cid not in seen:
+                seen.add(cid)
+                c = repo.get_commit(cid)
+                if (c.get("turn_ids") or []):
+                    found = cid
+                    break
+                parents = c.get("parents") or []
+                cid = parents[0] if parents else ""
+
+            if not found:
+                print("[gait] no commit with turns found to pin.")
+                continue
+
+            mem_id = repo.pin_commit(found, note=args.pin_note or "")
+            print(f"[gait] pinned {found} into memory")
+            print(f"[gait] memory: {mem_id}")
+            continue
+
+        # --- normal chat turn ---
+        messages.append({"role": "user", "content": user_text})
+
+        try:
+            assistant_text = ollama_chat(
+                host,
+                model,
+                messages,
+                temperature=args.temperature,
+                num_predict=args.num_predict,
+            )
+
+        except Exception as e:
+            print(f"[gait] ollama error: {e}")
+            # remove last user message so next try isn't polluted
+            messages.pop()
+            continue
+
+        print(f"ai> {assistant_text}\n")
+        messages.append({"role": "assistant", "content": assistant_text})
+
+        # record to GAIT
+        tokens = count_turn_tokens(
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
+
+        turn = Turn.v0(
+            user_text=user_text,
+            assistant_text=assistant_text,
+            context={"ollama_host": host},
+            tools={},
+            model={
+                "provider": "ollama",
+                "model": model,
+            },
+            tokens=tokens,
+            visibility="private",
+        )
+
+        _, commit_id = repo.record_turn(turn, message=args.message or "chat")
+        if args.echo_commit:
+            print(f"[gait] committed: {short_oid(commit_id)}")
+
+# ----------------------------
 # Parser
 # ----------------------------
 
@@ -333,6 +620,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--also-memory", action="store_true", help="Also rewind HEAD+ memory via memory reflog")
     s.set_defaults(func=cmd_revert)
 
+    s = sub.add_parser("chat", help="Interactive local chat with Ollama (records every turn into GAIT)")
+    s.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "127.0.0.1:11434"),
+                   help="Ollama host (default: 127.0.0.1:11434 or OLLAMA_HOST)")
+    s.add_argument("--model", default="", help="Model name (example: llama3.1:latest)")
+    s.add_argument("--temperature", type=float, default=None, help="Optional temperature")
+    s.add_argument("--system", default="", help="Extra system prompt (optional)")
+    s.add_argument("--no-memory", action="store_true", help="Do not inject GAIT pinned memory into system prompt")
+    s.add_argument("--also-memory", action="store_true", help="When using /revert, also rewind HEAD+ memory via reflog")
+    s.add_argument("--pin-note", default="", help="Optional note used by /pin")
+    s.add_argument("--message", default="chat", help="Commit message label for recorded turns")
+    s.add_argument("--echo-commit", action="store_true", help="Print short commit id after each recorded turn")
+    s.add_argument("--num-predict", type=int, default=200, help="Max tokens to generate per reply")
+    s.add_argument("--resume-turns", type=int, default=20,
+                   help="Replay last N turns from HEAD history into the chat context (default: 20)")
+    s.add_argument("--no-resume", action="store_true",
+                   help="Do not replay history (start fresh, only memory/system prompts)")
+    s.add_argument("--resume-from", default="HEAD",
+                   help="Commitish to resume from (default: HEAD)")
+    s.set_defaults(func=cmd_chat)
     return p
 
 

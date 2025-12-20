@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import time
 
 
 def now_iso() -> str:
-    # ISO-ish without timezone complexity (v0)
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
+
+# ----------------------------
+# Tokens
+# ----------------------------
 
 @dataclass(frozen=True)
 class Tokens:
@@ -21,6 +24,10 @@ class Tokens:
         return asdict(self)
 
 
+# ----------------------------
+# Turn
+# ----------------------------
+
 @dataclass(frozen=True)
 class Turn:
     schema: str
@@ -31,7 +38,7 @@ class Turn:
     tools: Dict[str, Any] = field(default_factory=dict)
     model: Dict[str, Any] = field(default_factory=dict)
     tokens: Tokens = field(default_factory=Tokens)
-    visibility: str = "private"  # private|shareable
+    visibility: str = "private"
 
     @staticmethod
     def v0(
@@ -41,9 +48,25 @@ class Turn:
         context: Optional[Dict[str, Any]] = None,
         tools: Optional[Dict[str, Any]] = None,
         model: Optional[Dict[str, Any]] = None,
-        tokens: Optional[Tokens] = None,
+        tokens: Optional[Union[Tokens, Dict[str, Any]]] = None,
         visibility: str = "private",
     ) -> "Turn":
+
+        # normalize tokens input
+        if tokens is None:
+            tokens_obj = Tokens()
+        elif isinstance(tokens, Tokens):
+            tokens_obj = tokens
+        elif isinstance(tokens, dict):
+            tokens_obj = Tokens(
+                input_total=tokens.get("input_total"),
+                output_total=tokens.get("output_total"),
+                estimated=bool(tokens.get("estimated", True)),
+                by_role=dict(tokens.get("by_role") or {}),
+            )
+        else:
+            raise TypeError(f"tokens must be Tokens | dict | None, got {type(tokens)}")
+
         return Turn(
             schema="gait.turn.v0",
             created_at=now_iso(),
@@ -52,15 +75,27 @@ class Turn:
             context=context or {},
             tools=tools or {},
             model=model or {},
-            tokens=tokens or Tokens(),
+            tokens=tokens_obj,
             visibility=visibility,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
-        d["tokens"] = self.tokens.to_dict()
+
+        # robust tokens serialization
+        if isinstance(self.tokens, Tokens):
+            d["tokens"] = self.tokens.to_dict()
+        elif isinstance(self.tokens, dict):
+            d["tokens"] = self.tokens
+        else:
+            d["tokens"] = Tokens().to_dict()
+
         return d
 
+
+# ----------------------------
+# Commit
+# ----------------------------
 
 @dataclass(frozen=True)
 class Commit:
@@ -70,7 +105,7 @@ class Commit:
     turn_ids: List[str]
     snapshot_id: Optional[str]
     branch: str
-    kind: str = "auto"  # auto|blessed|merge
+    kind: str = "auto"
     message: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
 

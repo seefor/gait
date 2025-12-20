@@ -213,6 +213,38 @@ class GaitRepo:
             "items": items,
         }
 
+    def iter_turns_from_head(
+        self,
+        *,
+        start_commit: Optional[str] = None,
+        limit_turns: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Walk commits backward from start_commit (default HEAD) following first-parent only,
+        collect up to limit_turns turns, and return them oldest->newest.
+        """
+        cid = start_commit or self.head_commit_id()
+        if not cid:
+            return []
+    
+        turns_newest_first: List[Dict[str, Any]] = []
+        seen_commits = set()
+    
+        while cid and cid not in seen_commits and len(turns_newest_first) < limit_turns:
+            seen_commits.add(cid)
+            c = self.get_commit(cid)
+    
+            for tid in (c.get("turn_ids") or []):
+                turns_newest_first.append(self.get_turn(tid))
+                if len(turns_newest_first) >= limit_turns:
+                    break
+                
+            parents = c.get("parents") or []
+            cid = parents[0] if parents else ""
+    
+        turns_newest_first.reverse()
+        return turns_newest_first
+
     # ----------------------------
     # Branch ops
     # ----------------------------

@@ -46,18 +46,29 @@ def resolve_prefix(objects_dir: Path, prefix: str) -> str:
     if len(prefix) >= 64:
         return prefix
 
+    if len(prefix) < 2:
+        base = objects_dir
+    elif len(prefix) < 4:
+        base = objects_dir / prefix[:2]
+    else:
+        base = objects_dir / prefix[:2] / prefix[2:4]
+
+    if not base.exists():
+        raise FileNotFoundError(f"No object found with prefix: {prefix}")
+
     matches = []
-    for p in objects_dir.rglob("*"):
+    # Only scan files in the narrowed directory tree
+    for p in base.rglob("*"):
         if p.is_file() and p.name.startswith(prefix):
-            matches.append(p)
+            matches.append(p.name)
 
     if not matches:
         raise FileNotFoundError(f"No object found with prefix: {prefix}")
     if len(matches) > 1:
-        cand = ", ".join(m.name[:12] for m in matches[:10])
+        cand = ", ".join(m[:12] for m in matches[:10])
         raise ValueError(f"Ambiguous prefix {prefix} matches {len(matches)} objects: {cand} ...")
 
-    return matches[0].name
+    return matches[0]
 
 def load_object(objects_dir: Path, oid: str) -> Dict[str, Any]:
     oid = resolve_prefix(objects_dir, oid)
