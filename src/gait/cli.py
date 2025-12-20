@@ -14,6 +14,7 @@ from .schema import Turn
 from .objects import short_oid
 from .log import walk_commits
 from .tokens import count_turn_tokens
+from .remote import RemoteSpec, remote_add, remote_get, push as remote_push, fetch as remote_fetch, pull as remote_pull, clone_into
 
 # ----------------------------
 ### Ollama API Helpers 
@@ -89,6 +90,75 @@ def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
             raise ValueError("HEAD is empty (no commits).")
         return cid
     return commitish.strip()
+
+# ----------------------------
+# Remote 
+# ---------------------------
+
+def _require_gaithub_token() -> str:
+    tok = os.environ.get("GAITHUB_TOKEN", "").strip()
+    if not tok:
+        raise RuntimeError("Missing GAITHUB_TOKEN env var (PAT-style token for gaithubd).")
+    return tok
+
+
+def cmd_remote_add(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    remote_add(repo, args.name, args.url)
+    print(f"remote {args.name} -> {args.url}")
+    return 0
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    token = _require_gaithub_token()
+    base_url = remote_get(repo, args.remote)
+
+    spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
+    remote_push(repo, spec, token=token, branch=args.branch)
+    print(f"pushed {args.branch or repo.current_branch()} to {args.remote} ({args.owner}/{args.repo})")
+    return 0
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    token = _require_gaithub_token()
+    base_url = remote_get(repo, args.remote)
+
+    spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
+    heads, mems = remote_fetch(repo, spec, token=token)
+    print(f"fetched: heads={len(heads)} memory={len(mems)}")
+    return 0
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    token = _require_gaithub_token()
+    base_url = remote_get(repo, args.remote)
+
+    spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
+    merge_id = remote_pull(
+        repo, spec,
+        token=token,
+        branch=args.branch or repo.current_branch(),
+        with_memory=args.with_memory,
+    )
+    print(f"pulled {args.remote}/{args.branch or repo.current_branch()} -> {repo.current_branch()}")
+    print(f"HEAD:   {merge_id}")
+    if args.with_memory:
+        print(f"memory: {repo.read_memory_ref(repo.current_branch())}")
+    return 0
+
+
+def cmd_clone(args: argparse.Namespace) -> int:
+    token = _require_gaithub_token()
+    dest = Path(args.path).resolve()
+
+    spec = RemoteSpec(base_url=args.url, owner=args.owner, repo=args.repo, name=args.remote)
+    clone_into(dest, spec, token=token, branch=args.branch)
+
+    print(f"cloned {args.owner}/{args.repo} into {dest}")
+    return 0
 
 # ----------------------------
 # Commands
@@ -639,6 +709,49 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--resume-from", default="HEAD",
                    help="Commitish to resume from (default: HEAD)")
     s.set_defaults(func=cmd_chat)
+
+    # ----------------------------
+    # Remote plumbing (v0)
+    # ----------------------------
+
+    s = sub.add_parser("remote", help="Manage remotes")
+    sub2 = s.add_subparsers(dest="remote_cmd", required=True)
+
+    r = sub2.add_parser("add", help="Add a remote")
+    r.add_argument("name")
+    r.add_argument("url", help="Base gaithubd URL, e.g. http://127.0.0.1:8787")
+    r.set_defaults(func=cmd_remote_add)
+
+    s = sub.add_parser("push", help="Push objects + refs to remote")
+    s.add_argument("remote", nargs="?", default="origin")
+    s.add_argument("--owner", required=True)
+    s.add_argument("--repo", required=True)
+    s.add_argument("--branch", default=None)
+    s.set_defaults(func=cmd_push)
+
+    s = sub.add_parser("fetch", help="Fetch refs + objects from remote")
+    s.add_argument("remote", nargs="?", default="origin")
+    s.add_argument("--owner", required=True)
+    s.add_argument("--repo", required=True)
+    s.set_defaults(func=cmd_fetch)
+
+    s = sub.add_parser("pull", help="Fetch + merge remote tracking branch into current branch")
+    s.add_argument("remote", nargs="?", default="origin")
+    s.add_argument("--owner", required=True)
+    s.add_argument("--repo", required=True)
+    s.add_argument("--branch", default=None)
+    s.add_argument("--with-memory", action="store_true")
+    s.set_defaults(func=cmd_pull)
+
+    s = sub.add_parser("clone", help="Clone a repo from gaithubd")
+    s.add_argument("url", help="Base gaithubd URL, e.g. http://127.0.0.1:8787")
+    s.add_argument("--owner", required=True)
+    s.add_argument("--repo", required=True)
+    s.add_argument("--path", required=True)
+    s.add_argument("--remote", default="origin")
+    s.add_argument("--branch", default="main")
+    s.set_defaults(func=cmd_clone)
+
     return p
 
 
