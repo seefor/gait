@@ -313,7 +313,6 @@ While DNS and permanent hosting are being finalized, gaithub is currently runnin
 
 https://gaithub-960937205198.us-central1.run.app
 
-
 ⚠️ Important
 
 This endpoint is temporary
