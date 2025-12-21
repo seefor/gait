@@ -38,6 +38,12 @@ def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
         return cid
     return commitish.strip()
 
+def _list_branches(repo: GaitRepo) -> list[str]:
+    # repo.refs_dir exists in your repo.py
+    if not repo.refs_dir.exists():
+        return []
+    return sorted([p.name for p in repo.refs_dir.iterdir() if p.is_file()])
+
 # ----------------------------
 # Remote 
 # ---------------------------
@@ -391,30 +397,25 @@ def cmd_chat(args: argparse.Namespace) -> int:
     def auto_detect() -> dict | None:
         # 1) Ollama
         if port_open("127.0.0.1", 11434):
-            return {
-                "provider": "ollama",
-                "host": "127.0.0.1:11434",
-            }
+            return {"provider": "ollama", "host": "127.0.0.1:11434"}
 
         # 2) Foundry Local
         if port_open("127.0.0.1", 63545):
-            # Foundry does NOT accept the alias as model for /v1/chat/completions
-            # It wants the full Model ID. Default to env override if provided.
             return {
                 "provider": "openai_compat",
                 "base_url": "http://127.0.0.1:63545",
+                # Foundry wants full model ID
                 "model": os.environ.get(
                     "GAIT_FOUNDRY_MODEL",
                     "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1",
                 ),
             }
 
-        # 3) LM Studio (later)
+        # 3) LM Studio
         if port_open("127.0.0.1", 1234):
             return {
                 "provider": "openai_compat",
                 "base_url": "http://127.0.0.1:1234",
-                # we don't know the model; user must set --model or GAIT_MODEL
             }
 
         return None
@@ -422,10 +423,12 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # ----------------------------
     # Decide provider + endpoint
     # ----------------------------
-    # Force openai_compat if base_url provided
+
+    # If user provides --base-url, default provider to openai_compat unless explicitly set
     if args.base_url and not args.provider:
         args.provider = "openai_compat"
 
+    # Auto-detect if user didn't force provider/base_url
     if not args.provider and not args.base_url:
         d = auto_detect()
         if not d:
@@ -441,101 +444,114 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if not args.model:
             args.model = d.get("model", "")
 
-        provider = (args.provider or "").strip()          # allow "" meaning auto earlier
-        host = args.host
-        base_url = args.base_url
-        api_key = args.api_key
-        
-        model = (args.model or os.environ.get("GAIT_MODEL", "").strip()).strip()
-        default_model = os.environ.get("GAIT_DEFAULT_MODEL", "").strip()
-        
-        # If you already ran auto-detect earlier, provider/base_url/host/model may already be set.
-        # If not, you'll want to do it before this section.
-        
-        # ----------------------------
-        # Default model selection
-        # ----------------------------
-        if provider == "ollama":
-            if not model:
-                models = ollama_list_models(host)
-                if not models:
-                    raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
-                model = "llama3.1" if "llama3.1" in models else models[0]
-                print(f"[gait] no --model provided; using: {model}")
-        
-        elif provider == "openai_compat":
-            if not base_url:
-                raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
-        
-            # ✅ If user didn't provide --model (and GAIT_MODEL isn't set), use GAIT_DEFAULT_MODEL
-            if not model and default_model:
-                model = default_model
-                print(f"[gait] using default model from GAIT_DEFAULT_MODEL: {model}")
-        
-            # Still no model -> error
-            if not model:
-                raise RuntimeError(
-                    "No model specified for openai_compat.\n"
-                    "Set GAIT_DEFAULT_MODEL (recommended) or pass --model explicitly.\n"
-                    "Examples:\n"
-                    "  export GAIT_DEFAULT_MODEL=gemma-3-4b\n"
-                    "  gait chat --provider openai_compat --base-url http://127.0.0.1:1234\n"
-                    "\n"
-                    "Foundry note: it often returns empty /v1/models so you may need the full model ID.\n"
-                    "  gait chat --provider openai_compat --base-url http://127.0.0.1:63545 "
-                    "--model DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
-                )
-        
-            # Convenience mapping for Foundry alias -> full ID
-            if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
-                model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
-        
-        else:
-            # If you want "provider==''" to mean auto-detect, you shouldn't reach here.
-            raise RuntimeError(f"Unknown provider: {provider!r}")
+    # ----------------------------
+    # Refresh locals AFTER detection/forcing
+    # ----------------------------
+    provider = (args.provider or "ollama").strip()
+    host = args.host
+    base_url = args.base_url
+    api_key = args.api_key
+
+    # Model precedence:
+    # 1) --model
+    # 2) GAIT_MODEL
+    # 3) (openai_compat only) GAIT_DEFAULT_MODEL
+    model = (args.model or os.environ.get("GAIT_MODEL", "").strip()).strip()
+    default_model = os.environ.get("GAIT_DEFAULT_MODEL", "").strip()
+
+    # ----------------------------
+    # Default model selection
+    # ----------------------------
+    if provider == "ollama":
+        if not model:
+            models = ollama_list_models(host)
+            if not models:
+                raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
+            model = "llama3.1" if "llama3.1" in models else models[0]
+            print(f"[gait] no --model provided; using: {model}")
+
+    elif provider == "openai_compat":
+        if not base_url:
+            raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
+
+        # If user didn't provide a model, allow GAIT_DEFAULT_MODEL to set it
+        if not model and default_model:
+            model = default_model
+            print(f"[gait] using default model from GAIT_DEFAULT_MODEL: {model}")
+
+        if not model:
+            raise RuntimeError(
+                "No model specified for openai_compat.\n"
+                "Set GAIT_DEFAULT_MODEL (recommended) or pass --model explicitly.\n"
+                "Examples:\n"
+                "  export GAIT_DEFAULT_MODEL=gemma-3-4b\n"
+                "  gait chat --provider openai_compat --base-url http://127.0.0.1:1234\n"
+                "\n"
+                "Foundry note: it often returns empty /v1/models so you may need the full model ID.\n"
+                "  gait chat --provider openai_compat --base-url http://127.0.0.1:63545 "
+                "--model DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+            )
+
+        # Convenience mapping for Foundry alias -> full ID
+        if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
+            model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+
+    else:
+        raise RuntimeError(f"Unknown provider: {provider!r}")
 
     where = host if provider == "ollama" else base_url
     print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
-    print("[gait] enter your questions. Commands: /models /model NAME /pin /revert [/revert COMMIT] /memory /exit")
+    print("[gait] commands: /models /model NAME /branches /branch NAME /checkout NAME /pin /revert [/revert COMMIT] /memory /exit")
     print()
 
     # ----------------------------
     # Build chat messages (memory + optional resume)
     # ----------------------------
-    messages: list[dict] = []
+    def build_messages_for_current_branch() -> list[dict]:
+        msgs: list[dict] = []
 
-    if not args.no_memory:
-        bundle = repo.build_context_bundle(full=False)
-        if bundle.get("items"):
-            lines = ["You are a helpful assistant. Use the following pinned context from GAIT memory if relevant:"]
-            for it in bundle["items"]:
-                u = (it.get("user_text") or "").strip()
-                a = (it.get("assistant_text") or "").strip()
-                note = (it.get("note") or "").strip()
-                header = f"- PIN {it['index']}" + (f" ({note})" if note else "")
-                lines.append(header)
+        if not args.no_memory:
+            bundle = repo.build_context_bundle(full=False)
+            if bundle.get("items"):
+                lines = ["You are a helpful assistant. Use the following pinned context from GAIT memory if relevant:"]
+                for it in bundle["items"]:
+                    u = (it.get("user_text") or "").strip()
+                    a = (it.get("assistant_text") or "").strip()
+                    note = (it.get("note") or "").strip()
+                    header = f"- PIN {it['index']}" + (f" ({note})" if note else "")
+                    lines.append(header)
+                    if u:
+                        lines.append(f"  User: {u}")
+                    if a:
+                        lines.append(f"  Assistant: {a}")
+                msgs.append({"role": "system", "content": "\n".join(lines)})
+
+        if args.system:
+            msgs.append({"role": "system", "content": args.system})
+
+        # Resume: only if enabled AND there is a HEAD commit
+        do_resume = (not args.no_resume) and (args.resume_turns > 0)
+        head_id = repo.head_commit_id()
+        if do_resume and not head_id:
+            do_resume = False
+            print("[gait] no prior turns yet (empty HEAD); starting fresh (no-resume)")
+
+        if do_resume:
+            start = _resolve_commitish(repo, args.resume_from)
+            turns = repo.iter_turns_from_head(start_commit=start, limit_turns=args.resume_turns)
+            for t in turns:
+                u = (t.get("user") or {}).get("text", "")
+                a = (t.get("assistant") or {}).get("text", "")
                 if u:
-                    lines.append(f"  User: {u}")
+                    msgs.append({"role": "user", "content": u})
                 if a:
-                    lines.append(f"  Assistant: {a}")
-            messages.append({"role": "system", "content": "\n".join(lines)})
+                    msgs.append({"role": "assistant", "content": a})
+            if turns:
+                print(f"[gait] resumed {len(turns)} prior turn(s) from history")
 
-    if args.system:
-        messages.append({"role": "system", "content": args.system})
+        return msgs
 
-    do_resume = (not args.no_resume) and (args.resume_turns > 0)
-    if do_resume:
-        start = _resolve_commitish(repo, args.resume_from)
-        turns = repo.iter_turns_from_head(start_commit=start, limit_turns=args.resume_turns)
-        for t in turns:
-            u = (t.get("user") or {}).get("text", "")
-            a = (t.get("assistant") or {}).get("text", "")
-            if u:
-                messages.append({"role": "user", "content": u})
-            if a:
-                messages.append({"role": "assistant", "content": a})
-        if turns:
-            print(f"[gait] resumed {len(turns)} prior turn(s) from history")
+    messages = build_messages_for_current_branch()
 
     # ----------------------------
     # Interactive loop
@@ -553,6 +569,46 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if user_text in ("/exit", "/quit"):
             print("[gait] bye.")
             return 0
+
+        if user_text == "/branches":
+            bs = _list_branches(repo)
+            if not bs:
+                print("[gait] no branches found")
+            else:
+                cur = repo.current_branch()
+                for b in bs:
+                    mark = "*" if b == cur else " "
+                    head = repo.read_ref(b)
+                    head8 = head[:8] if head else "(empty)"
+                    print(f"{mark} {b}\t{head8}")
+            continue
+
+        if user_text.startswith("/branch "):
+            name = user_text.split(" ", 1)[1].strip()
+            if not name:
+                print("[gait] usage: /branch <name>")
+                continue
+            try:
+                repo.create_branch(name, from_commit=None, inherit_memory=True)
+                print(f"[gait] created branch: {name}")
+            except Exception as e:
+                print(f"[gait] branch error: {e}")
+            continue
+
+        if user_text.startswith("/checkout "):
+            name = user_text.split(" ", 1)[1].strip()
+            if not name:
+                print("[gait] usage: /checkout <name>")
+                continue
+            try:
+                repo.checkout(name)
+                # rebuild messages for the new branch (new memory + optional resume)
+                messages = build_messages_for_current_branch()
+                print(f"[gait] switched to branch: {name}")
+                print(f"[gait] HEAD: {repo.head_commit_id() or '(empty)'}")
+            except Exception as e:
+                print(f"[gait] checkout error: {e}")
+            continue
 
         if user_text == "/models":
             if provider == "ollama":
@@ -579,13 +635,85 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print("[gait] usage: /model <name>")
                 continue
             model = new_model
-            # small convenience mapping for Foundry alias
-            if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
+            if provider == "openai_compat" and base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
                 model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
             print(f"[gait] model set to: {model}")
             continue
 
-        # normal chat
+        if user_text == "/memory":
+            bundle = repo.build_context_bundle(full=False)
+            print(json.dumps(bundle, ensure_ascii=False, indent=2))
+            continue
+
+        if user_text.startswith("/revert"):
+            parts = user_text.split()
+            commit = parts[1] if len(parts) > 1 else None
+
+            branch = repo.current_branch()
+            head = repo.head_commit_id()
+            if not head:
+                print("[gait] nothing to revert (empty branch)")
+                continue
+
+            try:
+                if commit is None:
+                    c = repo.get_commit(head)
+                    parents = c.get("parents") or []
+                    if not parents:
+                        repo.write_ref(branch, "")
+                        print(f"[gait] reverted: {branch} is now empty")
+                    else:
+                        resolved = repo.reset_branch(parents[0])
+                        print(f"[gait] reverted: {branch} -> {resolved}")
+                else:
+                    resolved = repo.reset_branch(commit)
+                    print(f"[gait] reverted: {branch} -> {resolved}")
+
+                if args.also_memory:
+                    old_mem = repo.read_memory_ref(branch)
+                    new_mem = repo.reset_memory_to_commit(branch, repo.head_commit_id())
+                    print(f"[gait] memory: {old_mem} -> {new_mem}")
+
+                # after revert, rebuild messages (resume will include new history)
+                messages = build_messages_for_current_branch()
+
+            except Exception as e:
+                print(f"[gait] revert error: {e}")
+            continue
+
+        if user_text == "/pin":
+            head = repo.head_commit_id()
+            if not head:
+                print("[gait] no HEAD commit to pin.")
+                continue
+
+            cid = head
+            seen = set()
+            found = None
+            while cid and cid not in seen:
+                seen.add(cid)
+                c = repo.get_commit(cid)
+                if (c.get("turn_ids") or []):
+                    found = cid
+                    break
+                parents = c.get("parents") or []
+                cid = parents[0] if parents else ""
+
+            if not found:
+                print("[gait] no commit with turns found to pin.")
+                continue
+
+            try:
+                mem_id = repo.pin_commit(found, note=args.pin_note or "")
+                print(f"[gait] pinned {found} into memory")
+                print(f"[gait] memory: {mem_id}")
+                # after pin, rebuild system message so memory is injected
+                messages = build_messages_for_current_branch()
+            except Exception as e:
+                print(f"[gait] pin error: {e}")
+            continue
+
+        # --- normal chat turn ---
         messages.append({"role": "user", "content": user_text})
 
         try:
