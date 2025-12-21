@@ -289,8 +289,6 @@ What GAIT Is Not (Yet)
 
 ❌ MCP server (coming)
 
-❌ Remote sync (gaithub in progress)
-
 GAIT is intentionally small, explicit, and correct.
 
 Philosophy
@@ -300,6 +298,76 @@ Memory is intentional.
 Reversibility is non-negotiable.
 
 GAIT treats AI context like production infrastructure — not chat logs.
+
+## gaithub - remote hub for gait repositories
+
+Remote Repository (gaithub – Early Access)
+
+GAIT supports an experimental remote repository backend called gaithub.
+
+This enables pushing, pulling, and cloning GAIT repositories over HTTP — similar to how Git talks to GitHub — but purpose-built for AI context, turns, commits, and memory.
+
+Temporary Cloud Run Endpoint
+
+While DNS and permanent hosting are being finalized, gaithub is currently running on Google Cloud Run at:
+
+https://gaithub-960937205198.us-central1.run.app
+
+
+⚠️ Important
+
+This endpoint is temporary
+
+It may be reset, redeployed, or replaced without notice
+
+A stable domain name and authentication model are on the roadmap
+
+Using gaithub as a Remote
+
+You can treat this endpoint as a GAIT remote for early testing.
+
+Add it as a remote:
+
+gait remote add cloud https://gaithub-960937205198.us-central1.run.app
+
+
+Push a repository:
+
+gait push cloud --owner john --repo my-ai-project
+
+
+Clone from the remote:
+
+gait clone https://gaithub-960937205198.us-central1.run.app \
+  --owner john \
+  --repo my-ai-project \
+  --path ./my-ai-project-clone
+
+
+Verify the clone:
+
+cd my-ai-project-clone
+gait status
+gait log --limit 5
+gait verify
+
+Roadmap: gaithub
+
+Planned improvements include:
+
+Stable DNS (e.g. gaithub.ai or similar)
+
+Authentication & authorization
+
+Forks and pull requests (GAIT-native, not Git)
+
+Remote memory policies
+
+Hosted public and private repositories
+
+MCP-compatible remote context export
+
+Remote sync is intentionally not required for GAIT’s core philosophy — but when used, it enables collaboration, backup, and distributed agent workflows.
 
 Status
 
