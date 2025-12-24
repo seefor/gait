@@ -1,395 +1,229 @@
-# gait
-GAIT
+# GAIT (Git for AI Turns)
 
-Git-Like Version Control for AI Conversations
+Git-Like Version Control for AI Conversations, Prompts, and Long-Lived Memory.
 
-GAIT is an open-source, Git-inspired version control system for AI conversations, prompts, and long-lived memory.
+GAIT is a specialized version control system built to solve the "poisoned context" problem in LLM workflows. In standard AI chat interfaces, conversations are linear and fragile; one bad turn or a significant hallucination permanently alters the model's "window," often requiring you to delete the chat and start over.
 
-It treats AI context as versioned infrastructure, not disposable chat logs.
+GAIT treats AI context as versioned infrastructure. It allows you to commit conversation states, branch different reasoning paths, pin specific memories, and sync your "reasoning repos" across machines.
 
-Think of GAIT as Git for reasoning, not files.
+## 1. Why GAIT? 
 
-Why GAIT Exists
+The Problem with Linear Chat
 
-AI workflows don’t behave like filesystems:
+Traditional AI workflows suffer from three major issues:
 
-Conversations evolve over time
+* Context Pollution: If an LLM gives a wrong answer and you continue the chat, the model is now "primed" by its own mistake.
 
-Some context should persist, some should not
+* Memory Drift: As conversations get long, important early instructions or "ground truths" get pushed out of the model's sliding window.
 
-Bad turns must be reversible
+* The "What-If" Wall: If you want to see how a different prompt or model would have handled a question 10 turns ago, you usually have to copy-paste the whole history into a new window.
 
-Experiments should not pollute production memory
+GAIT fixes this by introducing the Commit/Branch/Merge workflow to AI reasoning.
 
-Prompt changes need safe branching and rollback
+## 2. Core Concepts
 
-Traditional chat tools collapse history, memory, and state into one fragile stream.
+### The Turn (The "Blob")
 
-GAIT separates them — while keeping everything inspectable, versioned, and reversible.
+A Turn is the atomic unit of GAIT. It contains the user's prompt and the assistant's response. Like a Git blob, it is content-addressed (hashed); if the text changes, the ID changes.
 
-What GAIT Lets You Do
+### The Commit
 
-Record user ↔ assistant turns as immutable objects
+A Commit wraps one or more turns with metadata: the model used, the provider, the timestamp, and—most importantly—a pointer to the parent commit. This creates a Directed Acyclic Graph (DAG) of your conversation.
 
-Commit conversation state to branches
+### HEAD+ Memory (The "Secret Sauce")
 
-Pin important turns into explicit, long-lived memory
+This is GAIT's most powerful feature. Standard LLMs have "short-term memory" (the sliding window). GAIT adds HEAD+ Memory:
 
-Resume conversations safely (or start fresh automatically)
+* Intentional: You explicitly /pin turns that contain "Golden Rules" or vital project info.
 
-Branch, merge, and experiment without losing context
+* Persistent: Pinned turns are injected into the System Prompt for every future turn on that branch, regardless of how long the history gets.
 
-Rewind history and memory independently
+* Versioned: Memory has its own Reflog. If you revert a commit, GAIT can automatically rewind your memory to exactly how it looked at that moment.
 
-Chat interactively with local LLMs while versioning every turn
+## 3. Installation & Quick Start
 
-Core Concepts
-Turns
+## Requirements
 
-A turn is a single user + assistant interaction:
+Python 3.10+
 
-User:      "What is GAIT?"
-Assistant: "GAIT is Git for AI conversations."
+A local LLM framework running: Ollama, LM Studio, or Microsoft Foundry Local.
 
+## Installation
 
-Turns are:
+``` Bash
 
-Immutable
+git clone https://github.com/your-username/gait.git
+cd gait
+pip gait-ai
 
-Content-addressed
+```
 
-Stored once, referenced everywhere
+## Initialize a Repository
 
-Commits
+Navigate to your project folder and run:
 
-A commit references one or more turns and includes metadata and parents.
-
-Normal commits contain turns
-
-Merge commits contain no turns
-
-Commits form a DAG (just like Git)
-
-This enables safe history traversal, branching, and merges.
-
-Memory (HEAD+ Memory)
-
-Memory is explicitly pinned context that survives across turns.
-
-Key properties:
-
-Memory is opt-in
-
-Only pinned turns enter memory
-
-Memory is versioned independently from commits
-
-Memory has its own reflog
-
-This prevents accidental context bloat and hallucination drift.
-
-Repository Layout
-
-GAIT stores everything in a .gait/ directory:
-
-.gait/
-├── HEAD
-├── objects/          # content-addressed objects (turns, commits, memory)
-├── refs/
-│   ├── heads/        # branches
-│   └── memory/       # branch memory refs
-├── turns.jsonl       # turn → commit log
-└── memory.jsonl      # memory reflog
-
-
-No magic. Everything is inspectable.
-
-Installation (Dev / Editable)
-python -m venv GAITING
-source GAITING/bin/activate
-pip install -e .
-
-
-This installs the gait CLI into your environment.
-
-PyPI packaging coming next.
-
-Quick Start
-Initialize a repo
+``` Bash
 gait init
+```
 
-Record a turn
-gait record-turn \
-  --user "What is GAIT?" \
-  --assistant "GAIT is Git for AI conversations."
+This creates a .gait/ directory. You are now ready to version your thoughts.
 
+## 4. The Interactive Chat Workflow
 
-This:
+The primary way to use GAIT is through the gait chat command. It feels like a standard terminal chat but works like a version-controlled environment.
 
-Stores the turn
+```Bash
+gait chat --model llama3.1
+```
 
-Creates a commit
+### Common Commands inside gait chat
 
-Advances HEAD
+Commands and Actions:
 
-Pin important context into memory
-gait pin --last --note "baseline definition"
+/undo
 
+The Safety Net. Erases the last Q&A turn and moves the branch back to the previous state.
 
-Pinned turns now become part of HEAD+ memory.
+/pin
 
-gait memory
+Freeze Context. Marks the current turn as "Memory." It will now stay in the model's context forever.
 
-View history
-gait log
-gait show HEAD
+/branch <name>
 
-Interactive Chat (Local LLMs)
+Split Reality. Create a new timeline to explore a different idea without affecting your main chat.
 
-GAIT includes an interactive chat mode that records every turn automatically.
+/checkout <name>
 
-gait chat
+Time Travel. Instantly switch between different conversation timelines.
 
-Supported local providers
+/merge <branch> [--with-memory]
 
-GAIT auto-detects local LLMs in this order:
+Merge another branch into the current one. Use --with-memory to also bring over pinned turns.
 
-Ollama — 127.0.0.1:11434
+/fetch 
 
-Foundry Local — 127.0.0.1:63545
+Sync with Remote. Pull down the latest commits and memory from your GaitHub remote.
 
-LM Studio — 127.0.0.1:1234
+/pull <owner> <repo> [--path <dir>]
 
-No flags required in the common case.
+Fast-forward Clone. Grab a reasoning repository from GaitHub and set it up locally.
 
-Defaults & Safety
+/push --owner <owner> --repo <repo>
 
-If history exists → GAIT resumes automatically
+Upload your current branch and memory to GaitHub for remote storage and sharing.
 
-If HEAD is empty → GAIT starts fresh
+/model <name>
 
-Memory is injected only if pinned
+Swap Brains. Switch from a 7B model to a 70B model mid-conversation.
 
-Resume can be disabled with --no-resume
+/memory
 
-Output is not truncated unless you explicitly set a token cap
+Audit. View a JSON manifest of everything currently pinned to your branch.
 
-Environment Overrides
-export GAIT_PROVIDER=openai_compat
-export GAIT_BASE_URL=http://127.0.0.1:1234
-export GAIT_DEFAULT_MODEL=gemma-3-4b
 
-Branching & Experiments
 
-Create and switch branches:
+## 5. Advanced Usage Scenarios
 
-gait branch experiment
-gait checkout experiment
+### Scenario A: Recovering from Hallucinations
 
+You've been chatting for an hour. You ask a complex coding question, and the AI provides a 200-line script that is completely wrong.
 
-Branches:
+The Old Way: You try to tell the AI it's wrong, but it gets confused and keeps referencing the bad code.
 
-Inherit commit history
+The GAIT Way: Type /undo. The bad code is gone from the history. The model's "window" is restored to the moment before the error occurred.
 
-Optionally inherit memory (--no-inherit-memory)
+### Scenario B: Model Comparison
 
-Are ideal for prompt and reasoning experiments
+You want to see if Gemma-2 or Llama-3 handles a specific logic puzzle better.Start on main with Llama-3 and ask the question.
 
-Inside gait chat
-/branches
-/branch new-idea
-/checkout new-idea
+/branch gemma-test
 
+/checkout gemma-test
 
-No context loss.
+/model gemma-2-9b
 
-Merging
+Ask the same question. Now you have two distinct commits you can compare using gait log.
 
-Merge a branch into the current branch:
+### Scenario C: Knowledge Merging
 
-gait merge experiment
+You spent a branch researching "AWS Security Patterns" and pinned the best answers. Now you want those security rules in your "Development" branch.
 
+``` Bash
 
-Merge memory explicitly:
+gait checkout development
+gait merge research-branch --with-memory
 
-gait merge experiment --with-memory
+```
 
+GAIT merges the histories and brings over all the pinned memory turns, deduplicating them so your context remains clean.
 
-Memory merges:
+## 6. Remote Syncing with GaitHub
 
-Deduplicate pinned turns
+GAIT is not limited to your local machine. By using a GaitHub remote, you can treat AI reasoning as a shared asset.
 
-Preserve provenance
+Setting up a Remote
 
-Are logged in the memory reflog
+```Bash
 
-Revert vs Reset (Important)
-gait revert — safe undo
-gait revert
-gait revert --also-memory
+gait remote add origin https://gaithub-960937205198.us-central1.run.app/
 
+```
 
-Moves HEAD to the parent commit
+Pushing & Pulling
 
-Optionally rewinds memory correctly
+```Bash
 
-Best for interactive usage
+# Push your reasoning to the cloud
+# (Requires GAITHUB_TOKEN environment variable)
 
-gait reset — power tool (advanced)
-gait reset <commit>
-gait reset --hard
+gait push origin --owner john --repo architecture-decisions
 
+# Resume that conversation on your laptop
+gait clone https://gaithub.your-server.com --owner john --repo architecture-decisions --path ./decisions
+```
 
-reset → move HEAD only
+## 7. Configuration & Environment Variables
 
-reset --hard → move HEAD + memory
+GAIT is designed to be "zero-config," but you can customize it heavily:
 
-Best for timeline surgery and cleanup
+Variables and Descriptions
 
-Memory Reflog (The Secret Sauce)
+GAIT_PROVIDER
 
-Every memory mutation is recorded with:
+Set to ollama or openai_compat.GAIT_DEFAULT_MODELThe model to use if none is specified.
 
-Timestamp
+GAIT_BASE_URL
 
-Branch
+The endpoint for your LLM (e.g., http://127.0.0.1:1234/v1).
 
-HEAD commit at the time
+GAITHUB_TOKEN
 
-Old memory → new memory
+Your authentication token for pushing to GaitHub.
 
-Reason (pin, unpin, merge, revert, reset)
+## 8. Repository Layout
 
-This makes memory auditable, reversible, and safe.
+GAIT is transparent. You can open any file in .gait/ to see exactly what is happening:
 
-Context Export (Agent-Ready)
-gait context --json
+.gait/objects/: 
 
+The content-addressed database. Every turn, commit, and memory manifest is stored here as a JSON file named by its SHA-256 hash.
 
-Produces a structured context bundle:
+.gait/refs/: 
 
-{
-  "schema": "gait.context.v0",
-  "branch": "main",
-  "memory_id": "...",
-  "pinned_items": 2,
-  "items": [...]
-}
+Simple text files containing hashes. refs/heads/main tells GAIT which commit is the "top" of the main branch.
 
+.gait/memory.jsonl: 
 
-Designed for:
+The Memory Reflog. A line-by-line audit trail of every time you pinned or unpinned an item.
 
-LLM prompts
+.gait/turns.jsonl: 
 
-Agent frameworks
+A mapping of Turn IDs to Commit IDs for easy lookup.
 
-MCP (future)
+## 9. Philosophy
 
-What GAIT Is Not (Yet)
+History is cheap. Storing text turns costs almost nothing.Memory is expensive. Large contexts slow down models and cause "Lost in the Middle" syndrome.
 
-❌ File version control
-❌ Automatic memory
-❌ Hosted SaaS
-❌ MCP server (coming)
+GAIT empowers the user to record everything but curate specifically. 
 
-GAIT is intentionally small, explicit, and correct.
-
-Philosophy
-
-History is cheap.
-Memory is intentional.
-Reversibility is non-negotiable.
-
-GAIT treats AI context like production infrastructure — not chat logs.
-
-gaithub — Remote Hub for GAIT Repositories (Early Access)
-
-GAIT supports an experimental remote backend called gaithub.
-
-This enables pushing, pulling, and cloning GAIT repositories over HTTP — purpose-built for AI turns, commits, and memory.
-
-Temporary Cloud Run Endpoint
-https://gaithub-960937205198.us-central1.run.app
-
-
-⚠️ Important
-
-Temporary endpoint
-
-May be reset or redeployed
-
-Stable DNS and auth are coming
-
-Early Access Limitation (Write Access)
-
-For now, anonymous write access is limited to my namespace:
-
-✅ Allowed: --owner john
-
-❌ Rejected: --owner anyone-else
-
-This is intentional while authentication is being built.
-
-Using gaithub as a Remote
-Add remote
-gait remote add cloud https://gaithub-960937205198.us-central1.run.app
-
-Push (early access)
-gait push cloud --owner john --repo my-ai-project
-
-Clone
-gait clone https://gaithub-960937205198.us-central1.run.app \
-  --owner john \
-  --repo my-ai-project \
-  --path ./my-ai-project-clone
-
-Verify
-cd my-ai-project-clone
-gait status
-gait log --limit 5
-gait verify
-
-Roadmap: gaithub
-
-Stable DNS (gaithub.com)
-
-Authentication & namespaces
-
-Forks & pull requests (GAIT-native)
-
-Remote memory policies
-
-Public & private repos
-
-MCP-compatible remote context export
-
-Status
-
-Version: 0.0.4
-
-State: Core model stable, active development
-
-What I Added / Fixed (Quick Checklist)
-✅ Added
-
-Clear section hierarchy
-
-Explicit safety guarantees
-
-Clarified output truncation behavior
-
-/merge and memory merge explanation
-
-Clear separation between revert vs reset
-
-Stronger gaithub early-access framing
-
-Agent-ready positioning without overclaiming MCP
-
-✅ Tightened
-
-Philosophy phrasing (less manifesto, more precision)
-
-Repetition removal
-
-Command examples grouped logically
+By treating your conversations like code, you move from "chatting with a bot" to "architecting a knowledge base."

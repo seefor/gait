@@ -8,6 +8,8 @@ from typing import Optional
 
 from pathlib import Path
 
+from regex import sub
+
 from .repo import GaitRepo
 from .schema import Turn
 from .objects import short_oid
@@ -156,14 +158,30 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_branch(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
-    repo.create_branch(
-        args.name,
-        from_commit=args.from_commit,
-        inherit_memory=(not args.no_inherit_memory),
-    )
-    print(f"Created branch {args.name}")
-    return 0
+    try:
+        repo.create_branch(
+            args.name,
+            from_commit=args.from_commit,
+            inherit_memory=(not args.no_inherit_memory),
+        )
+        print(f"Created branch {args.name}")
+        return 0
 
+    except FileExistsError:
+        if not args.force:
+            print(f"[gait] branch already exists: {args.name}")
+            print(f"[gait] tip: use `gait branch {args.name} --force` to reset it")
+            return 0
+
+        # --force: reset branch ref
+        target = args.from_commit if args.from_commit is not None else repo.head_commit_id()
+        repo.write_ref(args.name, target or "")
+        if not args.no_inherit_memory:
+            # mirror current branch memory ref into that branch (simple v0 behavior)
+            repo.write_memory_ref(repo.read_memory_ref(repo.current_branch()), args.name)
+
+        print(f"[gait] branch reset: {args.name} -> {(target or '(empty)')[:8]}")
+        return 0
 
 def cmd_checkout(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -171,6 +189,39 @@ def cmd_checkout(args: argparse.Namespace) -> int:
     print(f"Switched to branch {args.name}")
     return 0
 
+def cmd_delete(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    name = args.name.strip()
+
+    if name == "main" and not args.force:
+        print("[gait] refusing to delete 'main' (use --force if you really want)")
+        return 2
+
+    cur = repo.current_branch()
+    if name == cur:
+        if not args.force:
+            print(f"[gait] refusing to delete current branch '{name}' (use --force)")
+            return 2
+        # switch to main before deleting current branch
+        if (repo.refs_dir / "main").exists():
+            repo.checkout("main")
+            print("[gait] switched to main")
+        else:
+            raise RuntimeError("Cannot force-delete current branch: no 'main' branch exists")
+
+    ref = repo.refs_dir / name
+    mem = repo.memory_refs_dir / name
+
+    if not ref.exists():
+        print(f"[gait] no such branch: {name}")
+        return 0
+
+    ref.unlink()
+    if mem.exists():
+        mem.unlink()
+
+    print(f"[gait] deleted branch: {name}")
+    return 0
 
 def cmd_revert(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -501,7 +552,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     where = host if provider == "ollama" else base_url
     print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
-    print("[gait] commands: /models /model NAME /branches /branch NAME /checkout NAME /pin /revert [/revert COMMIT] /memory /exit")
+    print("[gait] commands: /models /model NAME /branches /branch NAME /checkout NAME /merge BRANCH [--with-memory] /delete BRANCH /pin /revert [/revert COMMIT] /memory /exit")
     print()
 
     # ----------------------------
@@ -552,6 +603,16 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return msgs
 
     messages = build_messages_for_current_branch()
+
+    def _require_gaithub_token() -> str:
+        tok = _get_gaithub_token()
+        if not tok:
+            raise RuntimeError("GAITHUB_TOKEN is not set")
+        return tok
+
+    def _remote_spec_from_repo(remote_name: str, owner: str, repo_name: str) -> RemoteSpec:
+        base_url = remote_get(repo, remote_name)
+        return RemoteSpec(base_url=base_url, owner=owner, repo=repo_name, name=remote_name)
 
     # ----------------------------
     # Interactive loop
@@ -736,6 +797,21 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print(f"[gait] merge error: {e}")
             continue
 
+        if user_text.startswith("/delete "):
+            name = user_text.split(" ", 1)[1].strip()
+            if not name:
+                print("[gait] usage: /delete <branch>")
+                continue
+            force = ("--force" in name.split())
+            name = name.replace("--force", "").strip()
+
+            try:
+                repo.delete_branch(name, force=force)
+                print(f"[gait] deleted branch: {name}")
+            except Exception as e:
+                print(f"[gait] delete error: {e}")
+            continue
+
         if user_text in ("/head", "/last"):
             head = repo.head_commit_id()
             if not head:
@@ -748,6 +824,109 @@ def cmd_chat(args: argparse.Namespace) -> int:
             parents = c.get("parents") or []
             p = ",".join(short_oid(x) for x in parents) if parents else "-"
             print(f"[gait] HEAD: {short_oid(head)}  {created}  {kind}  p=[{p}]  {msg}")
+            continue
+
+        # ----------------------------
+        # Remote slash commands
+        # ----------------------------
+        if user_text.startswith("/fetch"):
+            parts = user_text.split()
+            # /fetch [remote] --owner X --repo Y
+            remote_name = "origin"
+            owner = ""
+            repo_name = ""
+
+            # allow /fetch origin ...
+            if len(parts) >= 2 and not parts[1].startswith("--"):
+                remote_name = parts[1]
+
+            # parse flags (simple)
+            for i, p in enumerate(parts):
+                if p == "--owner" and i + 1 < len(parts):
+                    owner = parts[i + 1]
+                if p == "--repo" and i + 1 < len(parts):
+                    repo_name = parts[i + 1]
+
+            if not owner or not repo_name:
+                print("[gait] usage: /fetch [remote] --owner OWNER --repo REPO")
+                continue
+
+            try:
+                token = _require_gaithub_token()
+                spec = _remote_spec_from_repo(remote_name, owner, repo_name)
+                heads, mems = remote_fetch(repo, spec, token=token)
+                print(f"[gait] fetched: heads={len(heads)} memory={len(mems)}")
+            except Exception as e:
+                print(f"[gait] fetch error: {e}")
+            continue
+
+        if user_text.startswith("/pull"):
+            parts = user_text.split()
+            # /pull [remote] --owner X --repo Y [--branch B] [--with-memory]
+            remote_name = "origin"
+            owner = ""
+            repo_name = ""
+            branch = repo.current_branch()
+            with_mem = ("--with-memory" in parts)
+
+            if len(parts) >= 2 and not parts[1].startswith("--"):
+                remote_name = parts[1]
+
+            for i, p in enumerate(parts):
+                if p == "--owner" and i + 1 < len(parts):
+                    owner = parts[i + 1]
+                if p == "--repo" and i + 1 < len(parts):
+                    repo_name = parts[i + 1]
+                if p == "--branch" and i + 1 < len(parts):
+                    branch = parts[i + 1]
+
+            if not owner or not repo_name:
+                print("[gait] usage: /pull [remote] --owner OWNER --repo REPO [--branch BRANCH] [--with-memory]")
+                continue
+
+            try:
+                token = _require_gaithub_token()
+                spec = _remote_spec_from_repo(remote_name, owner, repo_name)
+                new_head = remote_pull(repo, spec, token=token, branch=branch, with_memory=with_mem)
+                print(f"[gait] pulled {remote_name}/{branch} -> {repo.current_branch()}")
+                print(f"[gait] HEAD:   {new_head}")
+                if with_mem:
+                    print(f"[gait] memory: {repo.read_memory_ref(repo.current_branch())}")
+                messages = build_messages_for_current_branch()
+            except Exception as e:
+                print(f"[gait] pull error: {e}")
+            continue
+
+        if user_text.startswith("/push"):
+            parts = user_text.split()
+            # /push [remote] --owner X --repo Y [--branch B]
+            remote_name = "origin"
+            owner = ""
+            repo_name = ""
+            branch = repo.current_branch()
+
+            if len(parts) >= 2 and not parts[1].startswith("--"):
+                remote_name = parts[1]
+
+            for i, p in enumerate(parts):
+                if p == "--owner" and i + 1 < len(parts):
+                    owner = parts[i + 1]
+                if p == "--repo" and i + 1 < len(parts):
+                    repo_name = parts[i + 1]
+                if p == "--branch" and i + 1 < len(parts):
+                    branch = parts[i + 1]
+
+            if not owner or not repo_name:
+                print("[gait] usage: /push [remote] --owner OWNER --repo REPO [--branch BRANCH]")
+                continue
+
+            try:
+                token = _require_gaithub_token()
+                spec = _remote_spec_from_repo(remote_name, owner, repo_name)
+                remote_push(repo, spec, token=token, branch=branch)
+                print(f"[gait] pushed {branch} to {remote_name} ({owner}/{repo_name})")
+            except Exception as e:
+                print(f"[gait] push error: {e}")
             continue
 
         # --- normal chat turn ---
@@ -819,11 +998,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--from-commit", default=None)
     s.add_argument("--no-inherit-memory", action="store_true",
                    help="Do not inherit HEAD+ memory from current branch")
+    s.add_argument("--force", action="store_true",
+                   help="If branch exists, reset it to --from-commit (or current HEAD)")
     s.set_defaults(func=cmd_branch)
 
     s = sub.add_parser("checkout", help="Switch branches")
     s.add_argument("name")
     s.set_defaults(func=cmd_checkout)
+
+    s = sub.add_parser("delete", help="Delete a branch (ref only)")
+    s.add_argument("name")
+    s.add_argument("--force", action="store_true",
+                   help="Allow deleting the current branch (will switch to main first)")
+    s.set_defaults(func=cmd_delete)
 
     s = sub.add_parser("record-turn", help="Record a user+assistant turn and auto-commit")
     s.add_argument("--user", required=True)

@@ -262,8 +262,8 @@ def push(repo: GaitRepo, spec: RemoteSpec, *, token: str, branch: Optional[str] 
         client.put_object_bytes(oid, canon)
 
     remote_refs = client.get_refs()
-    remote_head_old = (remote_refs.get("heads") or {}).get(branch, "")
-    remote_mem_old = (remote_refs.get("memory") or {}).get(branch, "")
+    remote_head_old = (remote_refs.get("heads") or {}).get(branch, "") or None
+    remote_mem_old  = (remote_refs.get("memory") or {}).get(branch, "") or None
 
     client.put_head_ref(branch, local_head, expected_old=remote_head_old)
     client.put_memory_ref(branch, local_mem, expected_old=remote_mem_old)

@@ -278,6 +278,37 @@ class GaitRepo:
         self.head_file.write_text(f"ref: refs/heads/{name}\n", encoding="utf-8")
 
 
+    def delete_branch(self, name: str, *, force: bool = False) -> None:
+        """
+        Delete a local branch ref (refs/heads/<name>) and its memory ref (refs/memory/<name>).
+
+        Safety:
+          - cannot delete current branch
+          - cannot delete main unless --force
+        """
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Branch name required")
+
+        cur = self.current_branch()
+        if name == cur:
+            raise ValueError(f"Cannot delete current branch: {name}")
+
+        if name == "main" and not force:
+            raise ValueError("Refusing to delete 'main' without force=True")
+
+        head_ref = self.refs_dir / name
+        if not head_ref.exists():
+            raise FileNotFoundError(f"Branch does not exist: {name}")
+
+        # delete branch head ref
+        head_ref.unlink()
+
+        # delete memory ref (ok if missing)
+        mem_ref = self.memory_refs_dir / name
+        if mem_ref.exists():
+            mem_ref.unlink()
+
     def fast_forward_branch(self, branch: str, new_head: str) -> str:
         """
         Fast-forward branch to new_head if possible.
@@ -638,6 +669,7 @@ class GaitRepo:
         merge_commit_id = store_object(self.objects_dir, commit.to_dict())
         self.write_ref(target_branch, merge_commit_id)
         return merge_commit_id
+
 
     # ----------------------------
     # Read helpers
