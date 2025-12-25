@@ -54,7 +54,7 @@ A local LLM framework running: Ollama, LM Studio, or Microsoft Foundry Local.
 
 git clone https://github.com/your-username/gait.git
 cd gait
-pip gait-ai
+pip install gait-ai
 
 ```
 
@@ -75,6 +75,17 @@ The primary way to use GAIT is through the gait chat command. It feels like a st
 ```Bash
 gait chat --model llama3.1
 ```
+
+## You can use CLOUD providers as well:
+
+# Use OpenAI ChatGPT (cloud)
+
+export GAIT_PROVIDER=chatgpt
+export OPENAI_API_KEY="sk-..."
+
+gait chat --model gpt-4.1-mini
+
+```Bash
 
 ### Common Commands inside gait chat
 
@@ -190,15 +201,33 @@ Variables and Descriptions
 
 GAIT_PROVIDER
 
-Set to ollama or openai_compat.GAIT_DEFAULT_MODELThe model to use if none is specified.
+LLM backend to use.
+
+Valid values:
+
+ollama
+
+openai_compat (Foundry Local, LM Studio)
+
+chatgpt (OpenAI cloud)
+
+GAIT_DEFAULT_MODEL
+
+Default model used if --model is not specified.
 
 GAIT_BASE_URL
 
-The endpoint for your LLM (e.g., http://127.0.0.1:1234/v1).
+Base URL for OpenAI-compatible APIs
+
+(e.g. http://127.0.0.1:1234 or https://api.openai.com/v1)
+
+OPENAI_API_KEY
+
+Required when using GAIT_PROVIDER=chatgpt.
 
 GAITHUB_TOKEN
 
-Your authentication token for pushing to GaitHub.
+Authentication token for pushing to a GaitHub remote.
 
 ## 8. Repository Layout
 
