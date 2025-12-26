@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import urllib.request
 import urllib.error
@@ -170,3 +171,109 @@ def openai_compat_chat(
             return content
 
     return ""
+
+# ============================
+# Gemini provider (Google Generative Language API, REST)
+# ============================
+
+def _gemini_api_key() -> str:
+    key = (os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")).strip()
+    if not key:
+        raise RuntimeError("Missing Gemini API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY).")
+    return key
+
+
+def gemini_list_models(api_key: str = "") -> list[str]:
+    api_key = (api_key or "").strip() or _gemini_api_key()
+
+    # v1beta models list
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    r = _http_json(url, method="GET", timeout=30.0)
+
+    out: list[str] = []
+    for m in (r.get("models") or []):
+        name = (m.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def gemini_chat(
+    model: str,
+    messages: list[dict],
+    *,
+    api_key: str = "",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    debug: bool = False,
+) -> str:
+    api_key = (api_key or "").strip() or _gemini_api_key()
+
+    model_id = (model or "").strip()
+    if not model_id:
+        raise RuntimeError("gemini_chat: model is required.")
+    if not model_id.startswith("models/"):
+        model_id = f"models/{model_id}"
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_id}:generateContent?key={api_key}"
+
+    # GAIT -> Gemini mapping:
+    # - system messages become system_instruction.parts[]
+    # - user/assistant become contents[] with roles user/model
+    system_parts: list[dict] = []
+    contents: list[dict] = []
+
+    for m in messages:
+        role = (m.get("role") or "").strip()
+        text = (m.get("content") or "")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text:
+            continue
+
+        if role == "system":
+            system_parts.append({"text": text})
+            continue
+
+        gem_role = "user" if role == "user" else "model"
+        contents.append({"role": gem_role, "parts": [{"text": text}]})
+
+    payload: Dict[str, Any] = {"contents": contents}
+
+    if system_parts:
+        payload["system_instruction"] = {"parts": system_parts}
+
+    gen_cfg: Dict[str, Any] = {}
+    if temperature is not None:
+        gen_cfg["temperature"] = float(temperature)
+    if max_tokens is not None:
+        gen_cfg["maxOutputTokens"] = int(max_tokens)
+    if gen_cfg:
+        payload["generationConfig"] = gen_cfg
+
+    r = _http_json(url, method="POST", payload=payload, timeout=600.0)
+
+    if debug:
+        # Gemini responses vary, but candidates[0] is typical
+        fc = (r.get("candidates") or [{}])[0]
+        if isinstance(fc, dict) and fc.get("finishReason"):
+            print(f"[gait] gemini finishReason={fc.get('finishReason')}")
+
+    candidates = r.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"Gemini returned no candidates: {r}")
+
+    content = (candidates[0] or {}).get("content") or {}
+    parts = content.get("parts") or []
+    texts: list[str] = []
+    for p in parts:
+        t = (p or {}).get("text")
+        if isinstance(t, str) and t:
+            texts.append(t)
+
+    out = "".join(texts).strip()
+    if not out:
+        # some errors come back with "promptFeedback" etc
+        raise RuntimeError(f"Gemini returned empty text parts: {r}")
+    return out
