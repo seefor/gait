@@ -26,6 +26,7 @@ from .verify import verify_repo
 from .llm import (
     ollama_list_models, ollama_chat,
     openai_compat_list_models, openai_compat_chat,
+    gemini_list_models, gemini_chat,
 )
 
 def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
@@ -598,10 +599,24 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
             model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
 
+    elif provider == "gemini":
+        if not model and default_model:
+            model = default_model
+            print(f"[gait] using default model from GAIT_DEFAULT_MODEL: {model}")
+        if not model:
+            model = "gemini-3-pro-preview"
+            print(f"[gait] no --model provided; using: {model}")
+
+
     else:
         raise RuntimeError(f"Unknown provider: {provider!r}")
 
-    where = host if provider == "ollama" else base_url
+    if provider == "ollama":
+        where = host
+    elif provider == "gemini":
+        where = "google-genai"
+    else:
+        where = base_url
     print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
     print("[gait] commands: /models /model NAME /branches /branch NAME /checkout NAME /merge BRANCH [--with-memory] /delete BRANCH /pin /revert [/revert COMMIT] /memory /exit")
     print()
@@ -723,22 +738,33 @@ def cmd_chat(args: argparse.Namespace) -> int:
             continue
 
         if user_text == "/models":
-            if provider == "ollama":
-                ms = ollama_list_models(host)
-                if not ms:
-                    print("[gait] no models found.")
+            try:
+                if provider == "ollama":
+                    ms = ollama_list_models(host)
+
+                elif provider == "gemini":
+                    # Uses GEMINI_API_KEY / GOOGLE_API_KEY (or args.api_key if you wire it)
+                    ms = gemini_list_models(api_key=api_key)
+
                 else:
-                    for m in ms:
-                        print(m)
-            else:
-                ms = openai_compat_list_models(base_url, api_key=api_key)
-                if not ms:
+                    # openai_compat or chatgpt (OpenAI-compatible /v1/models)
+                    ms = openai_compat_list_models(base_url, api_key=api_key)
+
+            except Exception as e:
+                print(f"[gait] models error: {e}")
+                continue
+
+            if not ms:
+                if provider in ("openai_compat", "chatgpt"):
                     print("[gait] (no models returned by /v1/models)")
                     if base_url.startswith("http://127.0.0.1:63545"):
                         print("[gait] Foundry tip: use `foundry service list` and pass the full Model ID via /model or --model.")
                 else:
-                    for m in ms:
-                        print(m)
+                    print("[gait] no models found.")
+                continue
+
+            for m in ms:
+                print(m)
             continue
 
         if user_text.startswith("/model "):
@@ -746,9 +772,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
             if not new_model:
                 print("[gait] usage: /model <name>")
                 continue
+
             model = new_model
-            if provider == "openai_compat" and base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
-                model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+
+            # Convenience mapping for Foundry alias -> full ID
+            if provider in ("openai_compat", "chatgpt") and base_url.startswith("http://127.0.0.1:63545"):
+                if model == "deepseek-r1-1.5b":
+                    model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+
             print(f"[gait] model set to: {model}")
             continue
 
@@ -1020,6 +1051,16 @@ def cmd_chat(args: argparse.Namespace) -> int:
                     temperature=args.temperature,
                     num_predict=args.num_predict,
                 )
+
+            elif provider == "gemini":
+                assistant_text = gemini_chat(
+                    model,
+                    messages,
+                    api_key=api_key,              # GEMINI_API_KEY / GOOGLE_API_KEY should also work in llm.py
+                    temperature=args.temperature,
+                    max_tokens=args.num_predict,
+                )
+
             else:
                 assistant_text = openai_compat_chat(
                     base_url,
@@ -1029,6 +1070,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                     temperature=args.temperature,
                     max_tokens=args.num_predict,
                 )
+
         except Exception as e:
             print(f"[gait] llm error: {e}")
             messages.pop()
@@ -1270,7 +1312,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--provider",
         default=os.environ.get("GAIT_PROVIDER", ""),
-        choices=["", "ollama", "openai_compat", "chatgpt", "chatGPT"],
+        choices=["", "ollama", "openai_compat", "chatgpt", "chatGPT", "gemini"],
         help=(
             "LLM provider backend.\n"
             "If omitted, GAIT auto-detects local providers by port.\n"
